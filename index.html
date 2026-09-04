@@ -1,0 +1,501 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Nacho's Elote Run</title>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    min-height: 100vh;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    font-family: Arial, sans-serif;
+    background: #f5d98b;
+    color: #3b2114;
+  }
+  .wrap { width: min(960px, 96vw); text-align: center; }
+  h1 { margin: 8px 0 4px; font-size: clamp(28px, 5vw, 48px); }
+  .subtitle { margin: 0 0 10px; }
+  .hud {
+    display: flex;
+    justify-content: space-between;
+    gap: 8px;
+    flex-wrap: wrap;
+    margin: 8px 0;
+    font-weight: bold;
+  }
+  .pill {
+    background: #fff4c9;
+    border: 2px solid #7d4525;
+    border-radius: 999px;
+    padding: 7px 13px;
+  }
+  canvas {
+    width: 100%;
+    aspect-ratio: 16 / 9;
+    display: block;
+    background: #8ed0df;
+    border: 5px solid #5c321d;
+    border-radius: 12px;
+    box-shadow: 0 8px 0 #5c321d;
+  }
+  .controls { margin-top: 12px; line-height: 1.5; }
+  button {
+    border: 2px solid #5c321d;
+    background: #e64b2e;
+    color: white;
+    padding: 9px 18px;
+    border-radius: 8px;
+    font-weight: bold;
+    cursor: pointer;
+  }
+  #message { min-height: 28px; margin: 8px; font-weight: bold; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>🌽 Nacho's Elote Run 🤼</h1>
+  <p class="subtitle">Run through town, grab the gold, power up with elote, and jump the luchadors!</p>
+
+  <div class="hud">
+    <div class="pill">🪙 Score: <span id="score">0</span></div>
+    <div class="pill">🌽 Elote Power: <span id="power">0</span></div>
+    <div class="pill">❤️ Lives: <span id="lives">3</span></div>
+    <div class="pill">🏁 Distance: <span id="distance">0</span>%</div>
+  </div>
+
+  <canvas id="game" width="960" height="540"></canvas>
+  <div id="message">Use ← → to move and ↑ to jump. Collect 100 coins to reach the goal!</div>
+  <button id="restart">Restart Game</button>
+  <div class="controls">
+    <b>Controls:</b> ← → move &nbsp; | &nbsp; ↑ jump &nbsp; | &nbsp; ↓ duck<br>
+    <small>Elote makes Nacho temporarily bigger and gives bonus points.</small>
+  </div>
+</div>
+
+<script>
+const canvas = document.getElementById("game");
+const ctx = canvas.getContext("2d");
+const scoreEl = document.getElementById("score");
+const powerEl = document.getElementById("power");
+const livesEl = document.getElementById("lives");
+const distanceEl = document.getElementById("distance");
+const message = document.getElementById("message");
+
+const W = canvas.width, H = canvas.height;
+const keys = {};
+let score, lives, distance, gameOver, won, powerTimer, spawnTimer, coinTimer, eloteTimer;
+let player, obstacles, coins, elotes, particles;
+
+document.addEventListener("keydown", e => {
+  if (["ArrowUp","ArrowDown","ArrowLeft","ArrowRight"," "].includes(e.key)) e.preventDefault();
+  keys[e.key] = true;
+  if (gameOver || won) {
+    if (e.key === "Enter") reset();
+  }
+});
+document.addEventListener("keyup", e => keys[e.key] = false);
+document.getElementById("restart").onclick = reset;
+
+function reset() {
+  score = 0; lives = 3; distance = 0; gameOver = false; won = false;
+  powerTimer = 0; spawnTimer = 50; coinTimer = 20; eloteTimer = 180;
+  obstacles = []; coins = []; elotes = []; particles = [];
+  player = { x: 120, y: 390, w: 42, h: 62, vy: 0, speed: 4.5, inv: 0, duck: false };
+  message.textContent = "Run! Collect coins, grab elote, and jump the luchadors!";
+  updateHUD();
+}
+
+function updateHUD() {
+  scoreEl.textContent = score;
+  powerEl.textContent = powerTimer > 0 ? Math.ceil(powerTimer/60) + "s" : "0";
+  livesEl.textContent = lives;
+  distanceEl.textContent = Math.min(100, Math.floor(distance/22)) + "%";
+}
+
+function rectsOverlap(a,b) {
+  return a.x < b.x+b.w && a.x+a.w > b.x && a.y < b.y+b.h && a.y+a.h > b.y;
+}
+
+function spawnObstacle() {
+  obstacles.push({
+    x: W + 20, y: 397, w: 48, h: 55,
+    speed: 5.5 + Math.min(4, distance/1500),
+    bob: Math.random()*Math.PI*2,
+    hit: false
+  });
+}
+
+function spawnCoin() {
+  coins.push({ x: W+20, y: 300 + Math.random()*105, r: 12, speed: 5.5 });
+}
+
+function spawnElote() {
+  elotes.push({ x: W+20, y: 320 + Math.random()*85, w: 30, h: 30, speed: 5.2, spin: 0 });
+}
+
+function addParticles(x,y,n=8) {
+  for(let i=0;i<n;i++) particles.push({
+    x,y,vx:(Math.random()-.5)*5,vy:(Math.random()-.5)*5-1,
+    life:35+Math.random()*20
+  });
+}
+
+function loseLife() {
+  if (player.inv > 0) return;
+  lives--;
+  player.inv = 90;
+  addParticles(player.x+20, player.y+30, 14);
+  if (lives <= 0) {
+    gameOver = true;
+    message.textContent = "¡Ay caramba! The luchadors caught you. Press Enter or Restart.";
+  }
+}
+
+function update() {
+  if (gameOver || won) return;
+
+  distance += 1;
+  if (player.inv > 0) player.inv--;
+  if (powerTimer > 0) powerTimer--;
+
+  if (keys.ArrowLeft) player.x -= player.speed;
+  if (keys.ArrowRight) player.x += player.speed;
+  player.x = Math.max(30, Math.min(W-80, player.x));
+
+  player.duck = !!keys.ArrowDown && player.y >= 390;
+  const grounded = player.y >= 390;
+  if (keys.ArrowUp && grounded) player.vy = -13;
+
+  player.vy += 0.65;
+  player.y += player.vy;
+  if (player.y > 390) { player.y = 390; player.vy = 0; }
+
+  spawnTimer--;
+  coinTimer--;
+  eloteTimer--;
+  if (spawnTimer <= 0) {
+    spawnObstacle();
+    spawnTimer = Math.max(55, 100 - distance/30 + Math.random()*45);
+  }
+  if (coinTimer <= 0) {
+    spawnCoin();
+    coinTimer = 28 + Math.random()*40;
+  }
+  if (eloteTimer <= 0) {
+    spawnElote();
+    eloteTimer = 260 + Math.random()*180;
+  }
+
+  obstacles.forEach(o => { o.x -= o.speed; o.bob += .08; });
+  coins.forEach(c => c.x -= c.speed);
+  elotes.forEach(e => { e.x -= e.speed; e.spin += .12; });
+  particles.forEach(p => { p.x += p.vx; p.y += p.vy; p.vy += .08; p.life--; });
+
+  obstacles = obstacles.filter(o => o.x > -80);
+  coins = coins.filter(c => c.x > -40);
+  elotes = elotes.filter(e => e.x > -50);
+  particles = particles.filter(p => p.life > 0);
+
+  const ph = player.duck ? 38 : (powerTimer > 0 ? 78 : 62);
+  const pw = powerTimer > 0 ? 54 : 42;
+  const pb = {x:player.x, y: player.y + (62-ph), w:pw, h:ph};
+
+  for (const o of obstacles) {
+    const ob = {x:o.x, y:o.y, w:o.w, h:o.h};
+    if (!o.hit && rectsOverlap(pb,ob)) {
+      o.hit = true;
+      loseLife();
+    }
+  }
+
+  coins = coins.filter(c => {
+    const b = {x:c.x-c.r,y:c.y-c.r,w:c.r*2,h:c.r*2};
+    if (rectsOverlap(pb,b)) {
+      score += powerTimer > 0 ? 20 : 10;
+      addParticles(c.x,c.y,6);
+      return false;
+    }
+    return true;
+  });
+
+  elotes = elotes.filter(e => {
+    if (rectsOverlap(pb,e)) {
+      powerTimer = 600;
+      score += 50;
+      addParticles(e.x+15,e.y+15,15);
+      message.textContent = "🌽 EL POLVO DE ELOTE! Nacho is powered up and HUGE!";
+      return false;
+    }
+    return true;
+  });
+
+  if (score >= 1000) {
+    won = true;
+    message.textContent = "🏆 ¡VIVA NACHO! You collected enough gold and reached the finish!";
+  }
+
+  updateHUD();
+}
+
+function drawBackground() {
+  // sky
+  ctx.fillStyle = "#8ed0df"; ctx.fillRect(0,0,W,H);
+  // sun
+  ctx.fillStyle = "#ffd45c"; ctx.beginPath(); ctx.arc(820,90,48,0,Math.PI*2); ctx.fill();
+
+  // distant mountains
+  ctx.fillStyle = "#7eb07b";
+  ctx.beginPath(); ctx.moveTo(0,330); ctx.lineTo(160,180); ctx.lineTo(290,330); ctx.lineTo(430,170); ctx.lineTo(600,330); ctx.lineTo(740,190); ctx.lineTo(960,330); ctx.lineTo(960,430); ctx.lineTo(0,430); ctx.fill();
+
+  // town buildings
+  const buildings = [
+    [0,250,120,145,"#d96842"], [125,220,135,175,"#f0bd65"],
+    [265,270,120,125,"#c9573c"], [390,205,150,190,"#f0d28b"],
+    [545,250,130,145,"#d8794e"], [680,215,125,180,"#e5b75d"],
+    [810,260,150,135,"#c75a45"]
+  ];
+  for (const b of buildings) {
+    ctx.fillStyle=b[4]; ctx.fillRect(b[0],b[1],b[2],b[3]);
+    ctx.fillStyle="#70442b";
+    for(let x=b[0]+18;x<b[0]+b[2]-15;x+=42) {
+      ctx.fillRect(x,b[1]+35,20,28);
+      ctx.fillRect(x,b[1]+88,20,28);
+    }
+  }
+
+  // road
+  ctx.fillStyle="#b98554"; ctx.fillRect(0,390,W,150);
+  ctx.fillStyle="#d8bd7c";
+  for(let x=-20;x<W;x+=100) ctx.fillRect(x,465,55,8);
+  // sidewalk
+  ctx.fillStyle="#e4cfa1"; ctx.fillRect(0,375,W,15);
+}
+
+function drawPlayer() {
+  const big = powerTimer > 0;
+  const w = big ? 58 : 46;
+  const h = player.duck ? 40 : (big ? 82 : 66);
+  const x = player.x, y = player.y + (66 - h);
+
+  if (player.inv % 10 < 5) {
+    // Red cape
+    ctx.fillStyle = "#a9272d";
+    ctx.beginPath();
+    ctx.moveTo(x + 6, y + 25);
+    ctx.lineTo(x - 18, y + 62);
+    ctx.lineTo(x + 12, y + 52);
+    ctx.closePath();
+    ctx.fill();
+
+    // Legs / tights
+    ctx.fillStyle = "#eef5f8";
+    ctx.fillRect(x + 8, y + 46, w / 3, 18);
+    ctx.fillRect(x + w - 15, y + 46, w / 3, 18);
+
+    // Red boots
+    ctx.fillStyle = "#b52c31";
+    ctx.fillRect(x + 3, y + 59, w / 3 + 4, 8);
+    ctx.fillRect(x + w - 11, y + 59, w / 3 + 4, 8);
+
+    // White wrestling trunks with red waistband
+    ctx.fillStyle = "#f5f1df";
+    ctx.fillRect(x + 5, y + 25, w - 10, 25);
+    ctx.fillStyle = "#c83236";
+    ctx.fillRect(x + 4, y + 40, w - 8, 8);
+
+    // Large blue-and-white torso
+    ctx.fillStyle = "#dceff3";
+    ctx.fillRect(x + 7, y + 20, w - 14, 23);
+    ctx.fillStyle = "#5a9fca";
+    ctx.fillRect(x + 7, y + 20, 8, 23);
+    ctx.fillRect(x + w - 15, y + 20, 8, 23);
+
+    // Full baby-blue luchador mask
+    ctx.fillStyle = "#8ed3e5";
+    ctx.beginPath();
+    ctx.arc(x + w / 2, y + 14, 19, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Red mask accents / crest
+    ctx.fillStyle = "#c83236";
+    ctx.beginPath();
+    ctx.moveTo(x + w / 2, y - 7);
+    ctx.lineTo(x + w / 2 - 9, y + 5);
+    ctx.lineTo(x + w / 2, y + 9);
+    ctx.lineTo(x + w / 2 + 9, y + 5);
+    ctx.closePath();
+    ctx.fill();
+
+    // Red side accents on the mask
+    ctx.fillStyle = "#c83236";
+    ctx.beginPath();
+    ctx.moveTo(x + 3, y + 12);
+    ctx.lineTo(x + 12, y + 6);
+    ctx.lineTo(x + 14, y + 13);
+    ctx.lineTo(x + 6, y + 20);
+    ctx.closePath();
+    ctx.fill();
+    ctx.beginPath();
+    ctx.moveTo(x + w - 3, y + 12);
+    ctx.lineTo(x + w - 12, y + 6);
+    ctx.lineTo(x + w - 14, y + 13);
+    ctx.lineTo(x + w - 6, y + 20);
+    ctx.closePath();
+    ctx.fill();
+
+    // Eye openings
+    ctx.fillStyle = "#f8f4df";
+    ctx.beginPath();
+    ctx.ellipse(x + w / 2 - 8, y + 13, 6, 4, 0, 0, Math.PI * 2);
+    ctx.ellipse(x + w / 2 + 8, y + 13, 6, 4, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Dark eye centers
+    ctx.fillStyle = "#241b1a";
+    ctx.beginPath();
+    ctx.arc(x + w / 2 - 8, y + 13, 2, 0, Math.PI * 2);
+    ctx.arc(x + w / 2 + 8, y + 13, 2, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Mask mouth opening and red chin accent
+    ctx.fillStyle = "#c83236";
+    ctx.fillRect(x + w / 2 - 6, y + 21, 12, 3);
+
+    // Belt buckle
+    ctx.fillStyle = "#e8c34d";
+    ctx.fillRect(x + w / 2 - 7, y + 40, 14, 8);
+
+    // Elote power aura
+    if (big) {
+      ctx.strokeStyle = "#ffd83d";
+      ctx.lineWidth = 5;
+      ctx.strokeRect(x - 5, y - 5, w + 10, h + 10);
+      ctx.fillStyle = "rgba(255,216,61,.18)";
+      ctx.fillRect(x - 5, y - 5, w + 10, h + 10);
+    }
+  }
+}
+function drawObstacle(o) {
+  const x = o.x, y = o.y;
+
+  // Cape
+  ctx.fillStyle = "#7d2631";
+  ctx.beginPath();
+  ctx.moveTo(x + 7, y + 24);
+  ctx.lineTo(x - 10, y + 52);
+  ctx.lineTo(x + 13, y + 46);
+  ctx.fill();
+
+  // Boots and legs
+  ctx.fillStyle = "#22252d";
+  ctx.fillRect(x + 8, y + 44, 12, 12);
+  ctx.fillRect(x + 30, y + 44, 12, 12);
+  ctx.fillStyle = "#d9b44a";
+  ctx.fillRect(x + 5, y + 51, 17, 6);
+  ctx.fillRect(x + 28, y + 51, 17, 6);
+
+  // Wrestling trunks
+  ctx.fillStyle = "#e8e8df";
+  ctx.fillRect(x + 6, y + 29, 36, 19);
+  ctx.fillStyle = "#b52c31";
+  ctx.fillRect(x + 6, y + 29, 36, 6);
+
+  // Muscular torso
+  ctx.fillStyle = "#4b63a4";
+  ctx.fillRect(x + 7, y + 19, 34, 18);
+
+  // Arms
+  ctx.fillStyle = "#c57a4d";
+  ctx.fillRect(x + 1, y + 22, 8, 20);
+  ctx.fillRect(x + 39, y + 22, 8, 20);
+  ctx.fillStyle = "#e5c06a";
+  ctx.fillRect(x, y + 39, 10, 6);
+  ctx.fillRect(x + 38, y + 39, 10, 6);
+
+  // Full luchador mask
+  ctx.fillStyle = "#e3b83e";
+  ctx.beginPath();
+  ctx.arc(x + 24, y + 14, 16, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Mask crest
+  ctx.fillStyle = "#7d2631";
+  ctx.beginPath();
+  ctx.moveTo(x + 24, y - 2);
+  ctx.lineTo(x + 15, y + 9);
+  ctx.lineTo(x + 24, y + 12);
+  ctx.lineTo(x + 33, y + 9);
+  ctx.closePath();
+  ctx.fill();
+
+  // Eye openings
+  ctx.fillStyle = "#f8f4df";
+  ctx.fillRect(x + 12, y + 11, 9, 6);
+  ctx.fillRect(x + 27, y + 11, 9, 6);
+  ctx.fillStyle = "#222";
+  ctx.fillRect(x + 16, y + 13, 3, 3);
+  ctx.fillRect(x + 28, y + 13, 3, 3);
+
+  // Mask mouth/chin
+  ctx.fillStyle = "#7d2631";
+  ctx.fillRect(x + 19, y + 21, 10, 3);
+}
+function drawCoin(c) {
+  ctx.fillStyle="#d99b18"; ctx.beginPath(); ctx.arc(c.x,c.y,c.r,0,Math.PI*2); ctx.fill();
+  ctx.fillStyle="#ffe071"; ctx.beginPath(); ctx.arc(c.x-3,c.y-3,c.r-5,0,Math.PI*2); ctx.fill();
+  ctx.fillStyle="#9b6810"; ctx.font="bold 14px Arial"; ctx.textAlign="center"; ctx.fillText("$",c.x,c.y+5);
+}
+
+function drawElote(e) {
+  ctx.save();
+  ctx.translate(e.x+15,e.y+15); ctx.rotate(Math.sin(e.spin)*.12);
+  ctx.fillStyle="#f5d33f"; ctx.fillRect(-8,-14,16,28);
+  ctx.fillStyle="#54a84f";
+  ctx.beginPath(); ctx.moveTo(-8,10); ctx.lineTo(-19,17); ctx.lineTo(-6,2); ctx.fill();
+  ctx.beginPath(); ctx.moveTo(8,10); ctx.lineTo(19,17); ctx.lineTo(6,2); ctx.fill();
+  ctx.restore();
+}
+
+function drawParticles() {
+  ctx.fillStyle="#fff0a5";
+  particles.forEach(p=>{ctx.globalAlpha=Math.max(0,p.life/50);ctx.fillRect(p.x,p.y,4,4);});
+  ctx.globalAlpha=1;
+}
+
+function drawOverlay() {
+  if (!gameOver && !won) return;
+  ctx.fillStyle="rgba(45,24,14,.72)"; ctx.fillRect(0,0,W,H);
+  ctx.fillStyle="#fff4c9"; ctx.textAlign="center";
+  ctx.font="bold 48px Arial";
+  ctx.fillText(won ? "¡VIVA NACHO!" : "GAME OVER",W/2,220);
+  ctx.font="bold 25px Arial";
+  ctx.fillText("Score: "+score,W/2,265);
+  ctx.font="20px Arial";
+  ctx.fillText("Press Enter or click Restart",W/2,305);
+}
+
+function draw() {
+  drawBackground();
+  coins.forEach(drawCoin);
+  elotes.forEach(drawElote);
+  obstacles.forEach(drawObstacle);
+  drawPlayer();
+  drawParticles();
+  drawOverlay();
+}
+
+function loop() {
+  update();
+  draw();
+  requestAnimationFrame(loop);
+}
+
+reset();
+loop();
+</script>
+</body>
+</html>
